@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docglue_secret}
       POSTGRES_DB: ${POSTGRES_DB:-docglue_db}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -16,6 +16,40 @@ services:
       interval: 3s
       timeout: 3s
       retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: docglue_backend
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-docglue}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docglue_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-docglue_db}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: docglue_frontend
+    restart: always
+    environment:
+      API_URL: http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
 
 volumes:
   pgdata:
