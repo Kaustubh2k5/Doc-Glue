@@ -1,6 +1,6 @@
 """
 Streamlit Inspection Dashboard for Doc-Glue Fact Knowledge Layer.
-Connects to FastAPI backend (/upload, /facts, /reconciliations).
+Connects to FastAPI backend (/upload, /facts, /reconciliations, /clear, /health).
 """
 import os
 import requests
@@ -9,7 +9,7 @@ import streamlit as st
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 st.set_page_config(
-    page_title="Doc-Glue | Fact Knowledge Layer",
+    page_title="Doc-Glue | Cluster-First Fact Layer",
     page_icon="🧩",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -65,6 +65,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def fetch_health():
+    try:
+        res = requests.get(f"{API_URL}/health", timeout=5)
+        if res.status_code == 200:
+            return res.json()
+    except Exception:
+        pass
+    return {}
+
+
 def fetch_facts():
     try:
         res = requests.get(f"{API_URL}/facts", timeout=10)
@@ -87,20 +97,27 @@ def fetch_reconciliations():
 
 # Sidebar Controls
 st.sidebar.title("🧩 Doc-Glue")
-st.sidebar.caption("Fact Knowledge Layer & Reconciliation Engine")
+st.sidebar.caption("Cluster-First Reconciliation Engine")
+
+health_info = fetch_health()
+active_model = health_info.get("active_model", "meta-llama/llama-3.3-70b-instruct:free")
+st.sidebar.info(f"🤖 **Active LLM Model**:\n`{active_model}`")
 
 st.sidebar.subheader("📄 Upload Document")
 uploaded_file = st.sidebar.file_uploader("Upload PDF Document", type=["pdf"])
 
 if uploaded_file is not None:
     if st.sidebar.button("Process Document", use_container_width=True):
-        with st.spinner("Parsing PDF, extracting facts, and processing reconciliations..."):
+        with st.spinner("Parsing PDF, extracting facts, and processing cluster reconciliations..."):
             try:
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
                 res = requests.post(f"{API_URL}/upload", files=files, timeout=60)
                 if res.status_code == 200:
                     data = res.json()
-                    st.sidebar.success(f"Extracted {data.get('facts_extracted')} facts from '{data.get('filename')}'!")
+                    if data.get("cached"):
+                        st.sidebar.info(f"⚡ Instant Cache Hit: '{data.get('filename')}' was already ingested!")
+                    else:
+                        st.sidebar.success(f"Extracted {data.get('facts_extracted')} facts from '{data.get('filename')}'!")
                     st.rerun()
                 else:
                     st.sidebar.error(f"Upload failed: {res.text}")
@@ -108,13 +125,24 @@ if uploaded_file is not None:
                 st.sidebar.error(f"API Connection error: {e}")
 
 st.sidebar.divider()
-if st.sidebar.button("🔄 Refresh Data", use_container_width=True):
-    st.rerun()
+col_sb1, col_sb2 = st.sidebar.columns(2)
+with col_sb1:
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.rerun()
+with col_sb2:
+    if st.button("🗑️ Clear DB", use_container_width=True):
+        try:
+            res = requests.delete(f"{API_URL}/clear", timeout=10)
+            if res.status_code == 200:
+                st.sidebar.success("Database cleared!")
+                st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Clear failed: {e}")
 
 
 # Main Dashboard
-st.title("Fact Knowledge Layer & Reconciliation Inspector")
-st.caption("Extracted numerical/semantic claims grounded in PDF evidence with cross-document reconciliation.")
+st.title("Fact Knowledge Layer & Cluster Reconciliation Inspector")
+st.caption("Extracted numerical/semantic claims grounded in PDF evidence with Cluster-First reconciliation.")
 
 facts_data = fetch_facts()
 reconciliations_data = fetch_reconciliations()
@@ -133,11 +161,9 @@ tab1, tab2 = st.tabs(["📊 Fact Ledger", "🔍 Reconciliation Inspector"])
 with tab1:
     st.subheader("Extracted Grounded Facts")
     if not facts_data:
-        st.info("No facts extracted yet. Upload a PDF using the sidebar to begin.")
+        st.info("No facts stored in the knowledge layer. Upload a PDF using the sidebar to begin.")
     else:
-        # Filter input
         search_query = st.text_input("Filter facts by Subject or Property:", "")
-        
         table_rows = []
         for f in facts_data:
             subj = f.get("subject", "")
@@ -159,9 +185,9 @@ with tab1:
         st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
 with tab2:
-    st.subheader("Cross-Document Pairwise Reconciliations")
+    st.subheader("Cluster-First Pairwise Reconciliations")
     if not reconciliations_data:
-        st.info("No reconciliations generated yet. Ingest multiple document facts to generate pairwise reconciliations.")
+        st.info("No reconciliations generated yet. Ingest multiple document facts to generate pairwise cluster reconciliations.")
     else:
         for idx, rec in enumerate(reconciliations_data, 1):
             rel = rec.get("relationship", "RECONCILED")
@@ -174,7 +200,6 @@ with tab2:
             ev_a = fact_a.get("evidence", {})
             ev_b = fact_b.get("evidence", {})
 
-            # Badge styling
             if rel == "CORROBORATED":
                 badge_html = '<span class="badge-corroborated">🟢 CORROBORATED</span>'
             elif rel == "CONTRADICTED":

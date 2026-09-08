@@ -61,13 +61,23 @@ class IFactRepository(ABC):
         """Finds top-k candidate facts matching vector similarity."""
         pass
 
+    @abstractmethod
+    def clear_all_data(self) -> None:
+        """Clears all facts and vector records from the database."""
+        pass
+
 
 class IReconciliationEvaluator(ABC):
-    """Abstract interface for evaluating pairwise relationship between facts."""
+    """Abstract interface for evaluating pairwise and cluster relationships between facts."""
 
     @abstractmethod
     def evaluate_pair(self, fact_a: Fact, fact_b: Fact) -> FactComparison:
         """Evaluates whether two facts corroborate, contradict, or can be reconciled."""
+        pass
+
+    @abstractmethod
+    def evaluate_cluster(self, cluster_id: str, candidate_facts: List[Fact]) -> List[FactComparison]:
+        """Evaluates a cluster of semantically related facts in a single pass."""
         pass
 
 
@@ -82,4 +92,9 @@ class IReconciliationRepository(ABC):
     @abstractmethod
     def get_all_comparisons(self) -> List[FactComparison]:
         """Retrieves all stored comparison results."""
+        pass
+
+    @abstractmethod
+    def clear_all_data(self) -> None:
+        """Clears all reconciliation records from the database."""
         pass

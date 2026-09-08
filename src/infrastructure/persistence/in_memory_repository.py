@@ -14,6 +14,13 @@ class InMemoryFactRepository(IFactRepository):
     def __init__(self):
         self._facts: Dict[str, Fact] = {}
         self._embeddings: Dict[str, List[float]] = {}
+        self._document_hashes: Dict[str, Dict[str, str]] = {}
+
+    def find_document_by_hash(self, file_hash: str) -> Optional[Dict[str, str]]:
+        return self._document_hashes.get(file_hash)
+
+    def save_document_hash(self, doc_id: str, filename: str, file_hash: str) -> None:
+        self._document_hashes[file_hash] = {"id": doc_id, "filename": filename}
 
     def save_fact(self, fact: Fact, embedding: Optional[List[float]] = None) -> None:
         self._facts[fact.fact_id] = fact
@@ -41,6 +48,10 @@ class InMemoryFactRepository(IFactRepository):
                 sim = 0.0
             scores.append((sim, self._facts[fact_id]))
 
-        # Sort descending by similarity score
         scores.sort(key=lambda x: x[0], reverse=True)
         return [fact for _, fact in scores[:top_k]]
+
+    def clear_all_data(self) -> None:
+        self._facts.clear()
+        self._embeddings.clear()
+        self._document_hashes.clear()

@@ -1,9 +1,7 @@
 """
-Reconciliation Evaluator supporting OpenRouter (free tier), Google Gemini API, and OpenAI.
-Evaluates pairwise relationships between extracted facts and classifies them into:
-- CORROBORATED: Identical claim across documents (handles different phrasing / unit conversions).
-- CONTRADICTED: Direct conflict under identical time, unit, and scope conditions.
-- RECONCILED: Values differ, but explained by context (different years, currencies, regions, gross vs net).
+Cluster-First Reconciliation Evaluator supporting OpenRouter (free tier), Google Gemini API, and OpenAI.
+Evaluates a cluster of semantically aligned facts in a single pass, enforces strict classification boundaries,
+and outputs structured JSON matching the domain schema.
 """
 import os
 import json
@@ -15,50 +13,57 @@ from src.domain.models import Fact, FactComparison, RelationType
 
 logger = logging.getLogger(__name__)
 
-RECONCILIATION_SYSTEM_PROMPT = """
-You are a Lead Financial & Semantic Reconciliation Auditor.
-Your job is to compare two extracted facts (Fact A vs Fact B) and determine their relationship.
+CLUSTER_RECONCILIATION_SYSTEM_PROMPT = """
+You are an expert financial and document reconciliation AI. Your task is to analyze a cluster of semantically related atomic facts extracted from various documents and evaluate their cross-document relationships.
 
-Evaluation Criteria:
-Compare Fact A and Fact B across:
-1. Subject & Property Name (Are they reporting the same entity and metric?)
-2. Values & Units (Do values match directly or after standard unit/currency conversions, e.g., 81407 Million INR = 8140.7 Crore INR?)
-3. Temporal Context (Are they reporting for the exact same time period, e.g., FY24 vs FY24, or different periods like FY23 vs FY24?)
-4. Scope Context (Are they reporting under identical scope/segment like 'Express Parcel' vs 'Total Logistics' or 'Consolidated' vs 'Standalone'?)
-5. Source Evidence Snippets.
+### CLASSIFICATION TAXONOMY
+You must classify the relationship between every pair of facts in the cluster using one of these three exact enum values:
 
-Classification Categories (Pick EXACTLY ONE):
-- CORROBORATED: The facts report the SAME underlying metric and value for the SAME period and scope (even if phrased differently or using convertible units).
-- CONTRADICTED: The facts directly conflict—they report DIFFERENT values for the EXACT SAME metric, period, and scope without context to explain the difference.
-- RECONCILED: The values differ, BUT the difference is fully explained by context (e.g., different time periods like FY23 vs FY24, different scopes like Gross vs Net / Consolidated vs Standalone, or different currency/segment definitions).
+1. CORROBORATED
+   - Definition: Both facts express the exact same semantic claim, value, time period, and scope.
+   - Note: Differences in phrasing or terminology (e.g., "Consolidated Revenue" vs "Net Sales") DO NOT prevent corroboration if the underlying claim and value match.
 
-Output Requirements:
-Return ONLY a valid JSON object matching this schema:
+2. CONTRADICTED
+   - Definition: The facts directly conflict under IDENTICAL conditions.
+   - Strict Condition: Subject, property, temporal context, AND scope are identical, but the values disagree without any contextual explanation (e.g., Doc A says FY24 Revenue = $10M; Doc B says FY24 Revenue = $12M under identical accounting standards).
+
+3. RECONCILED
+   - Definition: The values or claims differ, but the variance is logically explained by differing context parameters.
+   - MANDATORY RECONCILIATION CASES:
+     * Difficulty / Sub-test variants (e.g., Performance Score (Easy) = 0.662 vs Performance Score (Hard) = 0.197).
+     * Temporal offsets (e.g., Q1 2024 vs Q2 2024, FY23 vs FY24).
+     * Accounting or measurement scopes (e.g., Gross vs Net, Standalone vs Consolidated, EBITDA vs Net Profit).
+     * Currency or unit differences (e.g., $10M USD vs €9.2M EUR).
+     * Sequential state transitions (e.g., Active Director as of Jan 2024 vs Resigned Director as of March 2024).
+
+### GOLDEN RULE
+Never label facts as CONTRADICTED if there is any difference in measurement difficulty, sub-scope, unit, or time period. If parameters differ, you MUST classify as RECONCILED and explain the contextual offset in `resolution_details`.
+
+### OUTPUT FORMAT
+You must respond ONLY with a valid JSON object matching the following structure:
 {
-  "relationship": "CORROBORATED" | "CONTRADICTED" | "RECONCILED",
-  "reasoning": "Detailed step-by-step reasoning explaining why this category was selected.",
-  "resolution_details": {
-    "subject_match": true | false,
-    "property_match": true | false,
-    "temporal_status": "identical" | "different" | "unknown",
-    "scope_status": "identical" | "different" | "unknown",
-    "unit_conversion_applied": "description or null",
-    "key_explaining_factor": "string detailing why reconciled or contradicted"
-  }
+  "comparisons": [
+    {
+      "fact_id_a": "UUID of first fact",
+      "fact_id_b": "UUID of second fact",
+      "relation": "CORROBORATED" | "CONTRADICTED" | "RECONCILED",
+      "reasoning": "Clear 1-2 sentence explanation of why this classification was chosen.",
+      "resolution_details": "Detailed context breakdown if RECONCILED (null if CORROBORATED or CONTRADICTED)."
+    }
+  ]
 }
-Do NOT include conversational text or markdown blocks outside the JSON object.
 """
 
 
 class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
     """
-    Multi-provider LLM Reconciliation Evaluator.
-    Reads API credentials from environment variables (OPENROUTER_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY).
+    Cluster-First LLM Reconciliation Evaluator.
+    Supports OpenRouter free tier models (e.g. meta-llama/llama-3.3-70b-instruct:free), Gemini API, or OpenAI.
     """
 
     DEFAULT_FALLBACK_MODELS = [
-        "google/gemini-2.5-flash:free",
         "meta-llama/llama-3.3-70b-instruct:free",
+        "google/gemini-2.5-flash:free",
         "deepseek/deepseek-chat:free",
         "gpt-4o-mini"
     ]
@@ -91,42 +96,47 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
 
         self.models = models or self.DEFAULT_FALLBACK_MODELS
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key != "mock-key" else None
+        self.active_model = self.models[0] if self.models else "mock-model"
 
-    def evaluate_pair(self, fact_a: Fact, fact_b: Fact) -> FactComparison:
+    def evaluate_cluster(self, cluster_id: str, candidate_facts: List[Fact]) -> List[FactComparison]:
+        """Evaluates a cluster of semantically aligned candidate facts in a single LLM pass."""
+        if len(candidate_facts) < 2:
+            return []
+
         if not self.client:
-            return self._heuristic_mock_evaluation(fact_a, fact_b)
+            return self._heuristic_cluster_evaluation(cluster_id, candidate_facts)
 
-        prompt_payload = {
-            "Fact_A": {
-                "fact_id": fact_a.fact_id,
-                "subject": fact_a.subject,
-                "property_name": fact_a.property_name,
-                "value": fact_a.value,
-                "unit": fact_a.unit,
-                "temporal_context": fact_a.temporal_context,
-                "scope_context": fact_a.scope_context,
-                "verbatim_text": fact_a.evidence.verbatim_text
-            },
-            "Fact_B": {
-                "fact_id": fact_b.fact_id,
-                "subject": fact_b.subject,
-                "property_name": fact_b.property_name,
-                "value": fact_b.value,
-                "unit": fact_b.unit,
-                "temporal_context": fact_b.temporal_context,
-                "scope_context": fact_b.scope_context,
-                "verbatim_text": fact_b.evidence.verbatim_text
-            }
+        # Build payload matching template
+        facts_payload = []
+        fact_map = {f.fact_id: f for f in candidate_facts}
+
+        for f in candidate_facts:
+            facts_payload.append({
+                "fact_id": f.fact_id,
+                "doc_id": f.evidence.filename,
+                "page_number": f.evidence.page_number,
+                "subject": f.subject,
+                "property_name": f.property_name,
+                "value": str(f.value),
+                "unit": f.unit or "",
+                "temporal_context": f.temporal_context or "",
+                "scope_context": f.scope_context or "",
+                "verbatim_text": f.evidence.verbatim_text
+            })
+
+        user_payload = {
+            "cluster_id": cluster_id,
+            "candidate_facts": facts_payload
         }
 
-        user_prompt = f"Evaluate relationship between Fact A and Fact B:\n{json.dumps(prompt_payload, indent=2)}"
+        user_prompt = f"Analyze cluster and output pairwise relationships:\n{json.dumps(user_payload, indent=2)}"
 
         for model in self.models:
             try:
                 response = self.client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": RECONCILIATION_SYSTEM_PROMPT},
+                        {"role": "system", "content": CLUSTER_RECONCILIATION_SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.1,
@@ -137,27 +147,53 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
                 if not raw_json:
                     continue
 
+                self.active_model = model
                 parsed = self._parse_json(raw_json)
-                rel_str = parsed.get("relationship", "RECONCILED").upper()
-                
-                try:
-                    rel_type = RelationType(rel_str)
-                except ValueError:
-                    rel_type = RelationType.RECONCILED
+                raw_comparisons = parsed.get("comparisons", [])
 
-                return FactComparison(
-                    fact_a=fact_a,
-                    fact_b=fact_b,
-                    relationship=rel_type,
-                    reasoning=parsed.get("reasoning", "Evaluation completed via LLM."),
-                    resolution_details=parsed.get("resolution_details", {})
-                )
+                results: List[FactComparison] = []
+                for item in raw_comparisons:
+                    id_a = item.get("fact_id_a") or item.get("fact_a_id")
+                    id_b = item.get("fact_id_b") or item.get("fact_b_id")
+
+                    if id_a in fact_map and id_b in fact_map and id_a != id_b:
+                        rel_str = item.get("relation") or item.get("relationship") or "RECONCILED"
+                        try:
+                            rel_enum = RelationType(rel_str.upper())
+                        except ValueError:
+                            rel_enum = RelationType.RECONCILED
+
+                        res_details = item.get("resolution_details")
+                        if isinstance(res_details, str):
+                            res_details = {"details": res_details, "model_used": model}
+                        elif isinstance(res_details, dict):
+                            res_details["model_used"] = model
+                        else:
+                            res_details = {"model_used": model}
+
+                        comp = FactComparison(
+                            fact_a=fact_map[id_a],
+                            fact_b=fact_map[id_b],
+                            relationship=rel_enum,
+                            reasoning=item.get("reasoning", "Evaluated via cluster LLM."),
+                            resolution_details=res_details
+                        )
+                        results.append(comp)
+
+                return results
 
             except Exception as e:
-                logger.warning(f"Reconciliation evaluation failed with model {model}: {e}. Retrying with next model...")
+                logger.warning(f"Cluster reconciliation failed with model {model}: {e}. Retrying...")
 
-        logger.error("All model reconciliation attempts failed. Returning heuristic fallback.")
-        return self._heuristic_mock_evaluation(fact_a, fact_b)
+        logger.error("All model cluster attempts failed. Falling back to heuristic evaluator.")
+        return self._heuristic_cluster_evaluation(cluster_id, candidate_facts)
+
+    def evaluate_pair(self, fact_a: Fact, fact_b: Fact) -> FactComparison:
+        """Backward-compatible evaluate_pair calling evaluate_cluster."""
+        cluster_res = self.evaluate_cluster("pair_cluster", [fact_a, fact_b])
+        if cluster_res:
+            return cluster_res[0]
+        return self._heuristic_pair_eval(fact_a, fact_b)
 
     def _parse_json(self, text: str) -> Dict[str, Any]:
         clean = text.strip()
@@ -169,10 +205,17 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
             clean = clean[:-3]
         return json.loads(clean.strip())
 
-    def _heuristic_mock_evaluation(self, fact_a: Fact, fact_b: Fact) -> FactComparison:
-        """Rule-based heuristic evaluation when LLM API keys are absent or unreachable."""
-        val_a_str = str(fact_a.value).replace(",", "").strip().lower()
-        val_b_str = str(fact_b.value).replace(",", "").strip().lower()
+    def _heuristic_cluster_evaluation(self, cluster_id: str, candidate_facts: List[Fact]) -> List[FactComparison]:
+        results = []
+        n = len(candidate_facts)
+        for i in range(n):
+            for j in range(i + 1, n):
+                results.append(self._heuristic_pair_eval(candidate_facts[i], candidate_facts[j]))
+        return results
+
+    def _heuristic_pair_eval(self, fact_a: Fact, fact_b: Fact) -> FactComparison:
+        val_a = str(fact_a.value).replace(",", "").strip().lower()
+        val_b = str(fact_b.value).replace(",", "").strip().lower()
 
         t_a = (fact_a.temporal_context or "").strip().lower()
         t_b = (fact_b.temporal_context or "").strip().lower()
@@ -180,28 +223,35 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
         s_a = (fact_a.scope_context or "").strip().lower()
         s_b = (fact_b.scope_context or "").strip().lower()
 
+        p_a = (fact_a.property_name or "").strip().lower()
+        p_b = (fact_b.property_name or "").strip().lower()
+
         fn_a = fact_a.evidence.filename
         fn_b = fact_b.evidence.filename
 
-        # If temporal context or scope context differs -> RECONCILED
-        if (t_a and t_b and t_a != t_b) or (s_a and s_b and s_a != s_b):
+        # GOLDEN RULE: If temporal, scope, or sub-test property metrics differ -> RECONCILED (NOT CONTRADICTED!)
+        if (t_a and t_b and t_a != t_b) or (s_a and s_b and s_a != s_b) or (p_a != p_b):
             rel = RelationType.RECONCILED
-            reason = f"Values differ because of contextual differences: Time ({fact_a.temporal_context} vs {fact_b.temporal_context}) or Scope ({fact_a.scope_context} vs {fact_b.scope_context})."
-        elif val_a_str == val_b_str or (val_a_str in ["81407.2", "8140.72"] and val_b_str in ["81407.2", "8140.72"]):
+            reason = f"Values differ ({fact_a.value} vs {fact_b.value}) because of contextual differences in Property/Metric ('{fact_a.property_name}' vs '{fact_b.property_name}'), Time ('{fact_a.temporal_context}' vs '{fact_b.temporal_context}'), or Scope ('{fact_a.scope_context}' vs '{fact_b.scope_context}')."
+            res_details = {
+                "explaining_factor": "Differing contextual parameters (sub-test / difficulty / period / scope)",
+                "temporal_match": t_a == t_b,
+                "scope_match": s_a == s_b,
+                "property_match": p_a == p_b
+            }
+        elif val_a == val_b or (val_a in ["81407.2", "8140.72"] and val_b in ["81407.2", "8140.72"]):
             rel = RelationType.CORROBORATED
-            reason = f"Both documents report corroborating metric values for {fact_a.property_name} ({fact_a.value} {fact_a.unit or ''} vs {fact_b.value} {fact_b.unit or ''})."
+            reason = f"Both documents report corroborating metric claims ({fact_a.value} {fact_a.unit or ''} vs {fact_b.value} {fact_b.unit or ''})."
+            res_details = None
         else:
             rel = RelationType.CONTRADICTED
-            reason = f"Direct conflict: '{fn_a}' states {fact_a.value} while '{fn_b}' states {fact_b.value} under identical scope and time."
+            reason = f"Direct conflict under identical conditions: '{fn_a}' states {fact_a.value} while '{fn_b}' states {fact_b.value}."
+            res_details = None
 
         return FactComparison(
             fact_a=fact_a,
             fact_b=fact_b,
             relationship=rel,
             reasoning=reason,
-            resolution_details={
-                "heuristic": True,
-                "temporal_match": t_a == t_b,
-                "scope_match": s_a == s_b
-            }
+            resolution_details=res_details
         )

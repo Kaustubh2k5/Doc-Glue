@@ -1,22 +1,31 @@
 """
 Unit tests for ReconciliationUseCase.
-Tests candidate retrieval, self-comparison skipping, deduplication, and repository persistence.
+Tests Cluster-First candidate retrieval, self-comparison skipping, deduplication, and repository persistence.
 """
+from typing import List
 from src.domain.models import Fact, SourceEvidence, FactComparison, RelationType
 from src.application.reconciliation_usecase import ReconciliationUseCase
 from src.infrastructure.persistence.in_memory_repository import InMemoryFactRepository
 from src.infrastructure.embeddings.fast_embedding import FastEmbeddingService
 
 
-class MockEvaluator:
+class MockClusterEvaluator:
+    def evaluate_cluster(self, cluster_id: str, candidate_facts: List[Fact]) -> List[FactComparison]:
+        results = []
+        if len(candidate_facts) >= 2:
+            results.append(
+                FactComparison(
+                    fact_a=candidate_facts[0],
+                    fact_b=candidate_facts[1],
+                    relationship=RelationType.CORROBORATED,
+                    reasoning="Mock evaluation corroboration.",
+                    resolution_details={"mock": True}
+                )
+            )
+        return results
+
     def evaluate_pair(self, fact_a: Fact, fact_b: Fact) -> FactComparison:
-        return FactComparison(
-            fact_a=fact_a,
-            fact_b=fact_b,
-            relationship=RelationType.CORROBORATED,
-            reasoning="Mock evaluation corroboration.",
-            resolution_details={"mock": True}
-        )
+        return self.evaluate_cluster("pair_cluster", [fact_a, fact_b])[0]
 
 
 class MockReconciliationRepository:
@@ -33,7 +42,7 @@ class MockReconciliationRepository:
 def test_reconciliation_usecase():
     fact_repo = InMemoryFactRepository()
     rec_repo = MockReconciliationRepository()
-    evaluator = MockEvaluator()
+    evaluator = MockClusterEvaluator()
     embedding_service = FastEmbeddingService()
 
     usecase = ReconciliationUseCase(
@@ -47,14 +56,13 @@ def test_reconciliation_usecase():
     f1 = Fact(fact_id="f1", subject="Delhivery", property_name="Rev", value=100, evidence=evidence)
     f2 = Fact(fact_id="f2", subject="Delhivery", property_name="Rev", value=100, evidence=evidence)
 
-    # Save f1 in repo
-    emb1 = embedding_service.generate_embedding("Delhivery Rev 100")
+    emb1 = embedding_service.generate_embedding("Delhivery | Rev")
     fact_repo.save_fact(f1, emb1)
 
     # Process new fact f2
-    comparisons = usecase.process_new_fact(f2, top_k=5)
+    comparisons = usecase.process_new_facts([f2])
 
     assert len(comparisons) == 1
-    assert comparisons[0].fact_a.fact_id == "f2"
-    assert comparisons[0].fact_b.fact_id == "f1"
+    assert comparisons[0].fact_a.fact_id == "f1"
+    assert comparisons[0].fact_b.fact_id == "f2"
     assert len(rec_repo.saved_comparisons) == 1

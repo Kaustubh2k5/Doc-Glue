@@ -34,15 +34,20 @@ def test_evaluator_corroborated_category():
 
     evaluator = OpenAIReconciliationEvaluator()
     
-    # Mock LLM API response returning CORROBORATED
     mock_client = MagicMock()
     mock_completion = MagicMock()
     mock_message = MagicMock()
     mock_message.content = """
     {
-      "relationship": "CORROBORATED",
-      "reasoning": "Both documents report identical revenue for FY24 (81,407.2 Million INR equals 8,140.72 Crore INR).",
-      "resolution_details": {"unit_conversion": "1 Crore = 10 Million"}
+      "comparisons": [
+        {
+          "fact_id_a": "f1",
+          "fact_id_b": "f2",
+          "relation": "CORROBORATED",
+          "reasoning": "Both documents report identical revenue for FY24 (81,407.2 Million INR equals 8,140.72 Crore INR).",
+          "resolution_details": {"unit_conversion": "1 Crore = 10 Million"}
+        }
+      ]
     }
     """
     mock_completion.choices = [MagicMock(message=mock_message)]
@@ -60,15 +65,20 @@ def test_evaluator_contradicted_category():
 
     evaluator = OpenAIReconciliationEvaluator()
 
-    # Mock LLM API response returning CONTRADICTED
     mock_client = MagicMock()
     mock_completion = MagicMock()
     mock_message = MagicMock()
     mock_message.content = """
     {
-      "relationship": "CONTRADICTED",
-      "reasoning": "Direct conflict: doc1 reports 81,407.2 Million INR while doc2 reports 50,000 Million INR under identical FY24 consolidated conditions.",
-      "resolution_details": {"conflict_field": "value"}
+      "comparisons": [
+        {
+          "fact_id_a": "f1",
+          "fact_id_b": "f2",
+          "relation": "CONTRADICTED",
+          "reasoning": "Direct conflict: doc1 reports 81,407.2 Million INR while doc2 reports 50,000 Million INR under identical FY24 consolidated conditions.",
+          "resolution_details": null
+        }
+      ]
     }
     """
     mock_completion.choices = [MagicMock(message=mock_message)]
@@ -86,15 +96,20 @@ def test_evaluator_reconciled_category():
 
     evaluator = OpenAIReconciliationEvaluator()
 
-    # Mock LLM API response returning RECONCILED
     mock_client = MagicMock()
     mock_completion = MagicMock()
     mock_message = MagicMock()
     mock_message.content = """
     {
-      "relationship": "RECONCILED",
-      "reasoning": "Values differ (72,253 vs 81,407.2) because they cover different financial periods (FY23 vs FY24).",
-      "resolution_details": {"explaining_factor": "different_temporal_periods"}
+      "comparisons": [
+        {
+          "fact_id_a": "f1",
+          "fact_id_b": "f2",
+          "relation": "RECONCILED",
+          "reasoning": "Values differ (72,253 vs 81,407.2) because they cover different financial periods (FY23 vs FY24).",
+          "resolution_details": {"explaining_factor": "different_temporal_periods"}
+        }
+      ]
     }
     """
     mock_completion.choices = [MagicMock(message=mock_message)]
