@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 from openai import OpenAI
 from src.domain.interfaces import IFactExtractor
 from src.domain.models import Fact, SourceEvidence
+from src.infrastructure.metrics import PipelineMetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,13 @@ Rules:
     }
   ]
 }
+
+4. QUALITY RULES:
+   - Do NOT extract page numbers, table headers, section titles, or boilerplate text as facts.
+   - Do NOT extract facts where the value is missing, unclear, or purely decorative.
+   - Only extract facts that carry meaningful, verifiable domain information.
+   - If the chunk contains no extractable facts, return {"facts": []}.
+
 Do not add conversational commentary or extra keys outside "facts".
 """
 
@@ -100,6 +108,10 @@ class MultiProviderFactExtractor(IFactExtractor):
         if not text_chunk.strip():
             return []
 
+        # Pre-extraction quality gate: skip very short chunks
+        if len(text_chunk.strip()) < 50:
+            return []
+
         if not self.client:
             # Fallback mock extraction for local testing without API keys
             return self._mock_extraction(text_chunk, document_id, filename, page_number)
@@ -126,7 +138,16 @@ class MultiProviderFactExtractor(IFactExtractor):
                 facts_data = parsed.get("facts", [])
                 
                 facts: List[Fact] = []
+                metrics_collector = PipelineMetricsCollector()
+                doc_metrics = metrics_collector.get_or_create_doc_metrics(filename)
+                doc_metrics.facts_extracted += len(facts_data)
+                
                 for item in facts_data:
+                    # Post-extraction quality validation
+                    if not self._validate_fact(item):
+                        doc_metrics.facts_rejected_quality += 1
+                        continue
+                        
                     evidence = SourceEvidence(
                         document_id=document_id,
                         filename=filename,
@@ -145,7 +166,8 @@ class MultiProviderFactExtractor(IFactExtractor):
                         evidence=evidence
                     )
                     facts.append(fact)
-
+                
+                doc_metrics.facts_kept += len(facts)
                 return facts
 
             except Exception as e:
@@ -165,6 +187,28 @@ class MultiProviderFactExtractor(IFactExtractor):
             clean_text = clean_text[:-3]
         clean_text = clean_text.strip()
         return json.loads(clean_text)
+
+    GENERIC_SUBJECTS = {"", "unknown", "n/a", "na", "table", "header", "none", "figure", "chart", "source", "note", "notes"}
+
+    def _validate_fact(self, item: dict) -> bool:
+        """Validates an extracted fact against quality gates. Returns True if the fact is valid."""
+        subject = str(item.get("subject", "")).strip().lower()
+        if subject in self.GENERIC_SUBJECTS or len(subject) < 2:
+            return False
+
+        value = item.get("value")
+        if value is None or str(value).strip() == "" or str(value).strip().lower() in ("n/a", "none", "null", "-"):
+            return False
+
+        prop = str(item.get("property_name", "")).strip()
+        if len(prop) < 2 or prop.isdigit():
+            return False
+
+        verbatim = str(item.get("verbatim_text", "")).strip()
+        if len(verbatim) < 15:
+            return False
+
+        return True
 
     def _mock_extraction(
         self,

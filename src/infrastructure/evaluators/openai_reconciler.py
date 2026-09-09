@@ -48,6 +48,9 @@ You must respond ONLY with a valid JSON object matching the following structure:
       "fact_id_b": "UUID of second fact",
       "relation": "CORROBORATED" | "CONTRADICTED" | "RECONCILED",
       "reasoning": "Clear 1-2 sentence explanation of why this classification was chosen.",
+      "reasoning_gist": "Concise one-line summary, max 15 words (e.g., 'Same revenue figure, same period, values match').",
+      "source_context_a": "Brief verbatim excerpt from fact A's source supporting the claim.",
+      "source_context_b": "Brief verbatim excerpt from fact B's source supporting the claim.",
       "resolution_details": "Detailed context breakdown if RECONCILED (null if CORROBORATED or CONTRADICTED)."
     }
   ]
@@ -165,12 +168,15 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
 
                         res_details = item.get("resolution_details")
                         if isinstance(res_details, str):
-                            res_details = {"details": res_details, "model_used": model}
-                        elif isinstance(res_details, dict):
-                            res_details["model_used"] = model
-                        else:
-                            res_details = {"model_used": model}
+                            res_details = {"details": res_details}
+                        elif not isinstance(res_details, dict):
+                            res_details = {}
 
+                        # Attach new context fields
+                        res_details["model_used"] = model
+                        res_details["reasoning_gist"] = item.get("reasoning_gist", "")
+                        res_details["source_context_a"] = item.get("source_context_a", "")
+                        res_details["source_context_b"] = item.get("source_context_b", "")
                         comp = FactComparison(
                             fact_a=fact_map[id_a],
                             fact_b=fact_map[id_b],
@@ -233,20 +239,35 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
         if (t_a and t_b and t_a != t_b) or (s_a and s_b and s_a != s_b) or (p_a != p_b):
             rel = RelationType.RECONCILED
             reason = f"Values differ ({fact_a.value} vs {fact_b.value}) because of contextual differences in Property/Metric ('{fact_a.property_name}' vs '{fact_b.property_name}'), Time ('{fact_a.temporal_context}' vs '{fact_b.temporal_context}'), or Scope ('{fact_a.scope_context}' vs '{fact_b.scope_context}')."
+            factors = []
+            if p_a != p_b: factors.append("property")
+            if t_a != t_b: factors.append("time period")
+            if s_a != s_b: factors.append("scope")
             res_details = {
                 "explaining_factor": "Differing contextual parameters (sub-test / difficulty / period / scope)",
                 "temporal_match": t_a == t_b,
                 "scope_match": s_a == s_b,
-                "property_match": p_a == p_b
+                "property_match": p_a == p_b,
+                "reasoning_gist": f"Values differ due to different {', '.join(factors)}",
+                "source_context_a": fact_a.evidence.verbatim_text[:120] if fact_a.evidence.verbatim_text else "",
+                "source_context_b": fact_b.evidence.verbatim_text[:120] if fact_b.evidence.verbatim_text else ""
             }
         elif val_a == val_b or (val_a in ["81407.2", "8140.72"] and val_b in ["81407.2", "8140.72"]):
             rel = RelationType.CORROBORATED
             reason = f"Both documents report corroborating metric claims ({fact_a.value} {fact_a.unit or ''} vs {fact_b.value} {fact_b.unit or ''})."
-            res_details = None
+            res_details = {
+                "reasoning_gist": f"Same {fact_a.property_name}, same value across documents",
+                "source_context_a": fact_a.evidence.verbatim_text[:120] if fact_a.evidence.verbatim_text else "",
+                "source_context_b": fact_b.evidence.verbatim_text[:120] if fact_b.evidence.verbatim_text else ""
+            }
         else:
             rel = RelationType.CONTRADICTED
             reason = f"Direct conflict under identical conditions: '{fn_a}' states {fact_a.value} while '{fn_b}' states {fact_b.value}."
-            res_details = None
+            res_details = {
+                "reasoning_gist": f"Direct conflict: {fact_a.value} vs {fact_b.value} under identical conditions",
+                "source_context_a": fact_a.evidence.verbatim_text[:120] if fact_a.evidence.verbatim_text else "",
+                "source_context_b": fact_b.evidence.verbatim_text[:120] if fact_b.evidence.verbatim_text else ""
+            }
 
         return FactComparison(
             fact_a=fact_a,

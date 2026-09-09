@@ -18,6 +18,7 @@ from src.infrastructure.embeddings.openai_embedding import OpenAIEmbeddingServic
 from src.infrastructure.persistence.postgres_repository import PostgresFactRepository, PostgresReconciliationRepository
 from src.infrastructure.persistence.in_memory_repository import InMemoryFactRepository
 from src.infrastructure.evaluators.openai_reconciler import OpenAIReconciliationEvaluator
+from src.infrastructure.metrics import PipelineMetricsCollector
 from src.application.ingestion_usecase import IngestionUseCase
 from src.application.reconciliation_usecase import ReconciliationUseCase
 
@@ -169,6 +170,13 @@ def get_reconciliations():
     """Returns all pairwise reconciliations with relationship status, reasoning, and evidence snippets."""
     comparisons = container.reconciliation_repo.get_all_comparisons()
     return [comp.model_dump() for comp in comparisons]
+
+
+@app.get("/metrics")
+def get_metrics():
+    """Returns ingestion pipeline and clustering quality metrics."""
+    metrics = PipelineMetricsCollector()
+    return metrics.get_summary()
 
 
 @app.delete("/clear")
