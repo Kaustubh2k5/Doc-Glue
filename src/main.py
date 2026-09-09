@@ -12,6 +12,7 @@ from typing import List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.infrastructure.parsers.docling_parser import DoclingParser
 from src.infrastructure.parsers.fast_pdf_parser import FastPDFParser
 from src.infrastructure.extractors.llm_extractor import MultiProviderFactExtractor
 from src.infrastructure.embeddings.openai_embedding import OpenAIEmbeddingService
@@ -45,7 +46,13 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class DependencyContainer:
     def __init__(self):
-        self.parser = FastPDFParser()
+        try:
+            self.parser = DoclingParser()
+            logger.info("Initialized default PDF parser: DoclingParser")
+        except Exception as e:
+            logger.warning(f"Failed to initialize DoclingParser ({e}). Falling back to FastPDFParser (PyMuPDF)...")
+            self.parser = FastPDFParser()
+
         self.extractor = MultiProviderFactExtractor()
         self.embedding_service = OpenAIEmbeddingService()
         self.evaluator = OpenAIReconciliationEvaluator()

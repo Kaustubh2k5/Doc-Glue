@@ -159,7 +159,7 @@ try:
     b64 = base64.b64encode(svg_content.encode("utf-8")).decode("utf-8")
     st.sidebar.markdown(
         f'<div style="display: flex; justify-content: center; margin-bottom: 20px;">'
-        f'<img src="data:image/svg+xml;base64,{b64}" style="width: 200px; height: 200px;" />'
+        f'<img src="data:image/svg+xml;base64,{b64}" style="width: 300px; height: auto; max-width: 100%;" />'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -177,22 +177,30 @@ uploaded_files = st.sidebar.file_uploader("Upload PDF Documents", type=["pdf"], 
 
 if uploaded_files:
     if st.sidebar.button("Process & Merge", use_container_width=True):
-        with st.spinner(f"Extracting facts & reconciling {len(uploaded_files)} file(s)..."):
-            for uploaded_file in uploaded_files:
-                try:
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
-                    res = requests.post(f"{API_URL}/upload", files=files, timeout=600)
-                    if res.status_code == 200:
-                        data = res.json()
-                        if data.get("cached"):
-                            st.sidebar.info(f"Cache Hit: '{data.get('filename')}' retrieved from database.")
-                        else:
-                            st.sidebar.success(f"Extracted {data.get('facts_extracted')} facts from '{data.get('filename')}'.")
+        status_text = st.sidebar.empty()
+        progress_bar = st.sidebar.progress(0)
+        total_files = len(uploaded_files)
+        
+        for i, uploaded_file in enumerate(uploaded_files):
+            status_text.text(f"Parsing ({i + 1}/{total_files}): {uploaded_file.name}")
+            try:
+                files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
+                res = requests.post(f"{API_URL}/upload", files=files, timeout=600)
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("cached"):
+                        st.sidebar.info(f"Cache Hit: '{data.get('filename')}' retrieved from database.")
                     else:
-                        st.sidebar.error(f"Upload failed for {uploaded_file.name}: {res.text}")
-                except Exception as e:
-                    st.sidebar.error(f"API Connection error on {uploaded_file.name}: {e}")
-            st.rerun()
+                        st.sidebar.success(f"Extracted {data.get('facts_extracted')} facts from '{data.get('filename')}'.")
+                else:
+                    st.sidebar.error(f"Upload failed for {uploaded_file.name}: {res.text}")
+            except Exception as e:
+                st.sidebar.error(f"API Connection error on {uploaded_file.name}: {e}")
+            
+            progress_bar.progress(int(((i + 1) / total_files) * 100))
+        
+        status_text.text("Ingestion completed!")
+        st.rerun()
 
 st.sidebar.divider()
 col_sb1, col_sb2 = st.sidebar.columns(2)
