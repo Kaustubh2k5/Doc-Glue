@@ -1,7 +1,7 @@
 PyMuPDF
 pydantic
 openai
-httpx
+httpx<0.28.0
 python-dotenv
 psycopg[binary,pool]
 pgvector
@@ -13,4 +13,3 @@ requests
 numpy
 pytest
 pytest-asyncio
-docling
