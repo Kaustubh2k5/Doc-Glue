@@ -182,10 +182,25 @@ if uploaded_files:
         total_files = len(uploaded_files)
         
         for i, uploaded_file in enumerate(uploaded_files):
-            status_text.text(f"Parsing ({i + 1}/{total_files}): {uploaded_file.name}")
+            file_base = float(i) / total_files
+            file_scale = 1.0 / total_files
+            
+            # Stage 1: Parsing
+            status_text.markdown(f"**Stage 1/3: PyMuPDF Parsing**  \n`{uploaded_file.name}` ({i+1}/{total_files})")
+            progress_bar.progress(int((file_base + file_scale * 0.25) * 100))
+            
+            # Stage 2: Parallel Extraction
+            status_text.markdown(f"**Stage 2/3: Parallel LLM Fact Extraction**  \n`{uploaded_file.name}` ({i+1}/{total_files})")
+            progress_bar.progress(int((file_base + file_scale * 0.50) * 100))
+            
             try:
                 files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
                 res = requests.post(f"{API_URL}/upload", files=files, timeout=600)
+                
+                # Stage 3: Vector Indexing & Storage
+                status_text.markdown(f"**Stage 3/3: Vector Indexing & Reconciling**  \n`{uploaded_file.name}` ({i+1}/{total_files})")
+                progress_bar.progress(int((file_base + file_scale * 1.0) * 100))
+                
                 if res.status_code == 200:
                     data = res.json()
                     if data.get("cached"):
@@ -196,10 +211,8 @@ if uploaded_files:
                     st.sidebar.error(f"Upload failed for {uploaded_file.name}: {res.text}")
             except Exception as e:
                 st.sidebar.error(f"API Connection error on {uploaded_file.name}: {e}")
-            
-            progress_bar.progress(int(((i + 1) / total_files) * 100))
         
-        status_text.text("Ingestion completed!")
+        status_text.markdown("**Ingestion & Fact Reconciliation Complete!**")
         st.rerun()
 
 st.sidebar.divider()

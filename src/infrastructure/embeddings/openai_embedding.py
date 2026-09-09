@@ -78,3 +78,31 @@ class OpenAIEmbeddingService(IEmbeddingService):
             vector = [x / length for x in vector]
 
         return vector
+
+    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generates vector embeddings for a list of text strings concurrently."""
+        if not texts:
+            return []
+
+        if self.client:
+            # Attempt API batch payload first
+            try:
+                clean_texts = [t.strip() if t.strip() else " " for t in texts]
+                response = self.client.embeddings.create(
+                    model=self.model_name,
+                    input=clean_texts
+                )
+                sorted_data = sorted(response.data, key=lambda x: getattr(x, 'index', 0))
+                embeddings = [item.embedding for item in sorted_data]
+                if len(embeddings) == len(texts):
+                    return embeddings
+            except Exception:
+                pass
+
+            # Fast parallel thread pool execution for OpenRouter endpoint compatibility
+            from concurrent.futures import ThreadPoolExecutor
+            max_workers = min(16, len(texts))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                return list(executor.map(self.generate_embedding, texts))
+
+        return [self.generate_embedding(t) for t in texts]

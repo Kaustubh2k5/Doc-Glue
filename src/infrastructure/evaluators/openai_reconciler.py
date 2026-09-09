@@ -65,9 +65,10 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
     """
 
     DEFAULT_FALLBACK_MODELS = [
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "google/gemini-2.5-flash:free",
-        "deepseek/deepseek-chat:free",
+        "google/gemini-2.5-flash",
+        "meta-llama/llama-3.3-70b-instruct",
+        "deepseek/deepseek-chat",
+        "openai/gpt-4o-mini",
         "gpt-4o-mini"
     ]
 
@@ -98,6 +99,7 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
             self.base_url = base_url
 
         self.models = models or self.DEFAULT_FALLBACK_MODELS
+        self.failed_models = set()
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key != "mock-key" else None
         self.active_model = self.models[0] if self.models else "mock-model"
 
@@ -134,7 +136,9 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
 
         user_prompt = f"Analyze cluster and output pairwise relationships:\n{json.dumps(user_payload, indent=2)}"
 
-        for model in self.models:
+        active_models = [m for m in self.models if m not in self.failed_models] or self.models
+
+        for model in active_models:
             try:
                 response = self.client.chat.completions.create(
                     model=model,
@@ -189,6 +193,7 @@ class OpenAIReconciliationEvaluator(IReconciliationEvaluator):
                 return results
 
             except Exception as e:
+                self.failed_models.add(model)
                 logger.warning(f"Cluster reconciliation failed with model {model}: {e}. Retrying...")
 
         logger.error("All model cluster attempts failed. Falling back to heuristic evaluator.")

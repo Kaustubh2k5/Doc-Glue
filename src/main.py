@@ -46,12 +46,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class DependencyContainer:
     def __init__(self):
-        try:
-            self.parser = DoclingParser()
-            logger.info("Initialized default PDF parser: DoclingParser")
-        except Exception as e:
-            logger.warning(f"Failed to initialize DoclingParser ({e}). Falling back to FastPDFParser (PyMuPDF)...")
-            self.parser = FastPDFParser()
+        self.parser = FastPDFParser()
+        logger.info("Initialized standard high-speed PDF parser: FastPDFParser (PyMuPDF)")
 
         self.extractor = MultiProviderFactExtractor()
         self.embedding_service = OpenAIEmbeddingService()

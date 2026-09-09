@@ -42,6 +42,11 @@ class IEmbeddingService(ABC):
         """Generates a vector embedding representation for the text string."""
         pass
 
+    @abstractmethod
+    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generates vector embeddings for a list of text strings in a single batch."""
+        pass
+
 
 class IFactRepository(ABC):
     """Abstract interface for persisting and retrieving extracted facts and vectors."""

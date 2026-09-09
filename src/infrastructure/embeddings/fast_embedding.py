@@ -35,3 +35,6 @@ class FastEmbeddingService(IEmbeddingService):
             vector = [x / length for x in vector]
 
         return vector
+
+    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        return [self.generate_embedding(t) for t in texts]

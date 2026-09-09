@@ -6,6 +6,7 @@ import os
 import json
 import uuid
 import logging
+import threading
 from typing import List, Optional, Dict, Any
 from openai import OpenAI
 from src.domain.interfaces import IFactExtractor
@@ -13,6 +14,11 @@ from src.domain.models import Fact, SourceEvidence
 from src.infrastructure.metrics import PipelineMetricsCollector
 
 logger = logging.getLogger(__name__)
+
+# Module-level shared blacklists (shared across ALL extractor instances & threads)
+_global_failed_models: set = set()
+_global_credits_exhausted: bool = False
+_global_lock = threading.Lock()
 
 EXTRACTION_SYSTEM_PROMPT = """
 You are an expert financial and domain data extraction system.
@@ -61,9 +67,10 @@ class MultiProviderFactExtractor(IFactExtractor):
     """
 
     DEFAULT_FALLBACK_MODELS = [
-        "google/gemini-2.5-flash:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "deepseek/deepseek-chat:free",
+        "google/gemini-2.5-flash",
+        "meta-llama/llama-3.3-70b-instruct",
+        "deepseek/deepseek-chat",
+        "openai/gpt-4o-mini",
         "gpt-4o-mini"
     ]
 
@@ -105,6 +112,8 @@ class MultiProviderFactExtractor(IFactExtractor):
         filename: str,
         page_number: int
     ) -> List[Fact]:
+        global _global_credits_exhausted, _global_failed_models
+
         if not text_chunk.strip():
             return []
 
@@ -116,9 +125,19 @@ class MultiProviderFactExtractor(IFactExtractor):
             # Fallback mock extraction for local testing without API keys
             return self._mock_extraction(text_chunk, document_id, filename, page_number)
 
+        # Global credit exhaustion check — abort immediately if no credits
+        with _global_lock:
+            if _global_credits_exhausted:
+                return []
+
         user_prompt = f"Text Chunk (Page {page_number}):\n\"\"\"\n{text_chunk}\n\"\"\""
 
-        for model in self.models:
+        active_models = [m for m in self.models if m not in _global_failed_models]
+        if not active_models:
+            logger.warning("All models globally blacklisted. Returning empty.")
+            return []
+
+        for model in active_models:
             try:
                 response = self.client.chat.completions.create(
                     model=model,
@@ -127,6 +146,7 @@ class MultiProviderFactExtractor(IFactExtractor):
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.1,
+                    max_tokens=1500,
                     response_format={"type": "json_object"}
                 )
                 
@@ -171,7 +191,33 @@ class MultiProviderFactExtractor(IFactExtractor):
                 return facts
 
             except Exception as e:
-                logger.warning(f"Fact extraction failed with model {model}: {e}. Retrying with next model...")
+                err_str = str(e)
+                # Check if this is an account-level credit exhaustion (not model-specific)
+                is_credit_error = "can only afford" in err_str or (
+                    "402" in err_str and "credit" in err_str.lower()
+                )
+                is_inflight_error = "in_flight_budget_exhausted" in err_str
+                is_404 = "404" in err_str or "model not found" in err_str.lower()
+
+                if is_credit_error or is_inflight_error:
+                    # Account has no credits — blacklist this model AND check if all are exhausted
+                    with _global_lock:
+                        _global_failed_models.add(model)
+                        # If all models are now exhausted, set global flag to skip future calls
+                        remaining = [m for m in self.models if m not in _global_failed_models]
+                        if not remaining:
+                            _global_credits_exhausted = True
+                            logger.error(
+                                "OpenRouter credits exhausted across all models. "
+                                "All future extraction calls will be skipped until credits are replenished."
+                            )
+                    logger.warning(f"Credit exhaustion on model {model}: {e}. Trying next...")
+                elif is_404:
+                    with _global_lock:
+                        _global_failed_models.add(model)
+                    logger.warning(f"Model {model} unavailable (404). Blacklisting globally.")
+                else:
+                    logger.warning(f"Fact extraction failed with model {model}: {e}. Retrying with next model...")
 
         logger.error("All model extraction attempts failed. Returning empty list.")
         return []

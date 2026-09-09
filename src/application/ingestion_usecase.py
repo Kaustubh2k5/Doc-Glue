@@ -6,6 +6,7 @@ Adheres strictly to SOLID principles (Dependency Inversion: depends ONLY on abst
 import uuid
 import logging
 from typing import List
+from concurrent.futures import ThreadPoolExecutor
 from src.domain.interfaces import (
     IDocumentParser,
     IFactExtractor,
@@ -50,24 +51,41 @@ class IngestionUseCase:
         pages_content = self.parser.parse(file_path=file_path, document_id=document_id)
         logger.info(f"Successfully parsed {len(pages_content)} page(s) from '{filename}'")
 
-        extracted_facts: List[Fact] = []
+        if not pages_content:
+            return []
 
-        # Step 2: Extract facts per page chunk
-        for page_number, page_text in pages_content:
-            page_facts = self.extractor.extract_facts(
+        # Step 2: Parallel fact extraction across page chunks
+        def _extract_page(item):
+            page_number, page_text = item
+            return self.extractor.extract_facts(
                 text_chunk=page_text,
                 document_id=document_id,
                 filename=filename,
                 page_number=page_number
             )
 
-            # Step 3: Generate embeddings and persist each fact
-            for fact in page_facts:
-                fact_text_for_embedding = f"{fact.subject} {fact.property_name} {fact.value} {fact.temporal_context or ''} {fact.scope_context or ''}"
-                embedding = self.embedding_service.generate_embedding(fact_text_for_embedding)
-                
-                self.repository.save_fact(fact=fact, embedding=embedding)
-                extracted_facts.append(fact)
+        extracted_facts: List[Fact] = []
+        max_workers = min(8, len(pages_content))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(_extract_page, pages_content)
+            for page_facts in results:
+                extracted_facts.extend(page_facts)
+
+        if not extracted_facts:
+            logger.info(f"Completed ingestion for '{filename}': extracted 0 facts.")
+            return []
+
+        # Step 3: Batch generate vector embeddings for all facts in 1 call
+        embedding_texts = [
+            f"{fact.subject} {fact.property_name} {fact.value} {fact.temporal_context or ''} {fact.scope_context or ''}"
+            for fact in extracted_facts
+        ]
+        
+        embeddings = self.embedding_service.generate_embeddings(embedding_texts)
+
+        # Step 4: Save facts and embeddings to repository
+        for fact, embedding in zip(extracted_facts, embeddings):
+            self.repository.save_fact(fact=fact, embedding=embedding)
 
         logger.info(f"Completed ingestion for '{filename}': extracted and saved {len(extracted_facts)} total fact(s)")
         return extracted_facts

@@ -87,12 +87,9 @@ class VectorFactClusterer:
 
         metrics = PipelineMetricsCollector()
 
-        # Step 1: Generate embeddings for normalized string representations
-        fact_vectors: List[List[float]] = []
-        for fact in facts:
-            norm_str = f"{fact.subject} | {fact.property_name}"
-            vec = self.embedding_service.generate_embedding(norm_str)
-            fact_vectors.append(vec)
+        # Step 1: Generate embeddings for normalized string representations in 1 batch
+        norm_strs = [f"{fact.subject} | {fact.property_name}" for fact in facts]
+        fact_vectors = self.embedding_service.generate_embeddings(norm_strs)
 
         # Step 2: Build adjacency graph using two-stage gate
         n = len(facts)
